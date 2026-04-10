@@ -61,7 +61,7 @@ static mut CURRENT_THREAD_ENTRY: Option<extern "C" fn()> = None;
 
 /// Wrapper run as the initial `ra` for each green thread: call the user entry (from `CURRENT_THREAD_ENTRY`), then mark Finished and switch back.
 extern "C" fn thread_wrapper() {
-    let entry = unsafe { core::ptr::read(&raw const CURRENT_THREAD_ENTRY) };
+    let entry = unsafe { CURRENT_THREAD_ENTRY };
     if let Some(f) = entry {
         unsafe { CURRENT_THREAD_ENTRY = None };
         f();
@@ -137,7 +137,21 @@ impl Scheduler {
     ///    `sp` must be 16-byte aligned (e.g. `(stack_top - 16) & !15` to leave headroom).
     /// 3. Push a `GreenThread` with this context, state `Ready`, and `entry` stored for the wrapper to call.
     pub fn spawn(&mut self, entry: extern "C" fn()) {
-        todo!("alloc stack, init ctx with ra=thread_wrapper and aligned sp, push GreenThread(Ready, entry)")
+        let mut buffer = Vec::with_capacity(STACK_SIZE);
+        buffer.resize(STACK_SIZE, 0);
+        let stack_top = buffer.as_ptr() as usize + STACK_SIZE;
+        let aligned_top = (stack_top - 16) & !15;
+
+        let mut ctx = TaskContext::default();
+        ctx.ra = thread_wrapper as *const () as u64;
+        ctx.sp = aligned_top as u64;
+
+        self.threads.push(GreenThread {
+            ctx,
+            state: ThreadState::Ready,
+            _stack: Some(buffer),
+            entry: Some(entry),
+        });
     }
 
     /// Run the scheduler until all threads (except the main one) are `Finished`.
@@ -146,12 +160,67 @@ impl Scheduler {
     /// 2. Loop: if all threads in `threads[1..]` are `Finished`, break; otherwise call `schedule_next()` (which may switch away and later return).
     /// 3. Clear `SCHEDULER` when done.
     pub fn run(&mut self) {
-        todo!("set SCHEDULER to self, loop until threads[1..] all Finished, call schedule_next, then clear SCHEDULER")
+        unsafe {
+            SCHEDULER = self;
+        }
+
+        loop {
+            // Check if all spawned threads are finished
+            let all_finished = self.threads.iter().skip(1).all(|t| t.state == ThreadState::Finished);
+            if all_finished {
+                break;
+            }
+            self.schedule_next();
+        }
+
+        unsafe {
+            SCHEDULER = std::ptr::null_mut();
+        }
     }
 
     /// Find the next ready thread (starting from `current + 1` round-robin), mark current as `Ready` (if not `Finished`), mark next as `Running`, set `CURRENT_THREAD_ENTRY` if the next thread has an entry, then switch to it.
     fn schedule_next(&mut self) {
-        todo!("round-robin find next Ready, set current Ready (if not Finished), next Running, CURRENT_THREAD_ENTRY, then switch_context")
+        let total = self.threads.len();
+        let start = self.current;
+
+        // Find next ready thread
+        let mut next_idx = None;
+        for i in 1..total {
+            let idx = (start + i) % total;
+            if idx == 0 {
+                continue; // Skip main thread
+            }
+            if self.threads[idx].state == ThreadState::Ready {
+                next_idx = Some(idx);
+                break;
+            }
+        }
+
+        if let Some(next) = next_idx {
+            // Mark current thread as Ready if it's Running
+            if self.threads[self.current].state == ThreadState::Running {
+                self.threads[self.current].state = ThreadState::Ready;
+            }
+
+            // Set CURRENT_THREAD_ENTRY if the next thread has an entry
+            unsafe {
+                CURRENT_THREAD_ENTRY = self.threads[next].entry;
+                if CURRENT_THREAD_ENTRY.is_some() {
+                    self.threads[next].entry = None;
+                }
+            }
+
+            // Mark next thread as Running
+            self.threads[next].state = ThreadState::Running;
+            self.current = next;
+
+            // Switch context
+            let old_ctx_ptr = self.threads[start].ctx.as_mut_ptr();
+            let new_ctx_ptr = self.threads[next].ctx.as_ptr();
+            unsafe {
+                switch_context(&mut *old_ctx_ptr, &*new_ctx_ptr);
+            }
+        }
     }
 }
 
