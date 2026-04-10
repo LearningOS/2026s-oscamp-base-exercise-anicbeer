@@ -166,9 +166,22 @@ mod tests {
     fn test_switch_to_task() {
         COUNTER.store(0, Ordering::SeqCst);
 
+        // We need to use static variables for the contexts because the task function needs to reference them
+        static mut MAIN_CTX: TaskContext = TaskContext {
+            sp: 0, ra: 0, s0: 0, s1: 0, s2: 0, s3: 0, s4: 0, s5: 0, 
+            s6: 0, s7: 0, s8: 0, s9: 0, s10: 0, s11: 0,
+        };
+        static mut TASK_CTX: TaskContext = TaskContext {
+            sp: 0, ra: 0, s0: 0, s1: 0, s2: 0, s3: 0, s4: 0, s5: 0, 
+            s6: 0, s7: 0, s8: 0, s9: 0, s10: 0, s11: 0,
+        };
+
         extern "C" fn cooperative_task() {
             COUNTER.store(99, Ordering::SeqCst);
-            // Exit the task by returning, rather than trying to switch contexts from inside the task function
+            unsafe {
+                // Switch back to main context after setting the counter
+                switch_context(&mut *TASK_CTX, &*MAIN_CTX);
+            }
         }
 
         let (_stack_buf, stack_top) = alloc_stack();
@@ -176,12 +189,14 @@ mod tests {
         let mut task_ctx = TaskContext::empty();
         task_ctx.init(stack_top, cooperative_task as *const () as usize);
 
-        // Create a temporary context to allow us to switch back to main
-        let mut temp_ctx = TaskContext::empty();
         unsafe {
+            MAIN_CTX = main_ctx;
+            TASK_CTX = task_ctx;
+            
             // Switch to the task
-            switch_context(&mut temp_ctx, &task_ctx);
-            // When the task returns (after setting counter), we'll be back here
+            switch_context(&mut MAIN_CTX, &TASK_CTX);
+            
+            // After switching back, MAIN_CTX will be restored
         }
 
         assert_eq!(COUNTER.load(Ordering::SeqCst), 99);
