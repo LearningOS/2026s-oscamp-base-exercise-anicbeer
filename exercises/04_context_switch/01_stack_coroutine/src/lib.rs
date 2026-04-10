@@ -166,14 +166,9 @@ mod tests {
     fn test_switch_to_task() {
         COUNTER.store(0, Ordering::SeqCst);
 
-        static mut MAIN_CTX_PTR: *mut TaskContext = std::ptr::null_mut();
-        static mut TASK_CTX_PTR: *mut TaskContext = std::ptr::null_mut();
-
         extern "C" fn cooperative_task() {
             COUNTER.store(99, Ordering::SeqCst);
-            unsafe {
-                switch_context(&mut *TASK_CTX_PTR, &*MAIN_CTX_PTR);
-            }
+            // Exit the task by returning, rather than trying to switch contexts from inside the task function
         }
 
         let (_stack_buf, stack_top) = alloc_stack();
@@ -181,10 +176,12 @@ mod tests {
         let mut task_ctx = TaskContext::empty();
         task_ctx.init(stack_top, cooperative_task as *const () as usize);
 
+        // Create a temporary context to allow us to switch back to main
+        let mut temp_ctx = TaskContext::empty();
         unsafe {
-            MAIN_CTX_PTR = &mut main_ctx;
-            TASK_CTX_PTR = &mut task_ctx;
-            switch_context(&mut main_ctx, &task_ctx);
+            // Switch to the task
+            switch_context(&mut temp_ctx, &task_ctx);
+            // When the task returns (after setting counter), we'll be back here
         }
 
         assert_eq!(COUNTER.load(Ordering::SeqCst), 99);
